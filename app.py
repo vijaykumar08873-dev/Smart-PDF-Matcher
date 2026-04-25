@@ -10,59 +10,53 @@ import pytesseract
 def find_matching_docket(page, expected_dockets):
     # --- 1. NATIVE PDF TEXT CHECK ---
     native_text = page.get_text("text")
-    clean_native = re.sub(r'[\W_]+', '', native_text).upper()
+    clean_native = re.sub(r'\D', '', native_text) # Sirf numbers rakhega
     for expected in expected_dockets:
-        expected_up = expected.upper()
-        if expected_up in native_text.upper() or expected_up in clean_native:
+        if expected in native_text or expected in clean_native:
             return expected
             
     # --- Image Setup ---
     pix = page.get_pixmap(dpi=300)
-    img = Image.frombytes("RGB",[pix.width, pix.height], pix.samples)
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     
-    # --- 2. BARCODE CHECK ---
-    decoded_objects = decode(img)
     gray_img = ImageOps.grayscale(img)
     enhancer = ImageEnhance.Contrast(gray_img)
     sharp_img = enhancer.enhance(2.0)
-    decoded_objects_2 = decode(sharp_img)
     
-    all_barcodes = decoded_objects + decoded_objects_2
-    for obj in all_barcodes:
-        data = obj.data.decode('utf-8').strip()
-        for expected in expected_dockets:
-            if expected in data:
-                return expected
-
-    # --- 3. ZOOM OCR + FUZZY MATCHING (THE ULTIMATE FIX) ---
-    try:
-        # Image ko 2X bada karna taki OCR andha na ho
-        ocr_img = img.resize((img.width * 2, img.height * 2), Image.Resampling.LANCZOS)
-        ocr_sharp = sharp_img.resize((sharp_img.width * 2, sharp_img.height * 2), Image.Resampling.LANCZOS)
+    # --- 2. ROTATION BARCODE SWEEP (Ye Tedhe pages ka 100% ilaaj hai) ---
+    # Tedhe scan ko theek karne ke liye image ko alag-alag angles par ghuma kar scan karenge
+    angles_to_try =[0, 5, -5, 10, -10, 15, -15, 20, -20, 90, -90]
+    
+    for angle in angles_to_try:
+        rotated_img = sharp_img.rotate(angle, expand=True, fillcolor=255)
+        barcodes = decode(rotated_img)
         
-        text1 = pytesseract.image_to_string(ocr_img)
-        text2 = pytesseract.image_to_string(ocr_sharp)
-        full_text = text1 + " \n " + text2
-        
-        clean_ocr = re.sub(r'[\W_]+', '', full_text).upper()
-        # Sabse common OCR mistakes ko fix karna
-        super_clean_ocr = clean_ocr.translate(str.maketrans('OQDIlLSZGB', '0001115268'))
-        
-        for expected in expected_dockets:
-            expected_up = expected.upper()
+        for obj in barcodes:
+            data = obj.data.decode('utf-8').strip()
+            clean_data = re.sub(r'\D', '', data) # Barcode se kachra hatana
             
-            # Level 1: Direct ya Clean Match
-            if expected_up in full_text.upper() or expected_up in clean_ocr or expected_up in super_clean_ocr:
+            for expected in expected_dockets:
+                if expected in data or expected in clean_data:
+                    return expected
+
+    # --- 3. SMART OCR CHECK WITH FUZZY LOGIC ---
+    try:
+        ocr_text = pytesseract.image_to_string(sharp_img)
+        
+        # OCR ki common galtiyo ko (O ko 0, l ko 1) strictly theek karna
+        fixed_ocr = ocr_text.upper().translate(str.maketrans('OQDIlLSZGB?', '00011152687'))
+        pure_digits_ocr = re.sub(r'\D', '', fixed_ocr) # Isme se saare alphabet nikal dena
+        
+        for expected in expected_dockets:
+            # Exact Match in digits
+            if expected in pure_digits_ocr:
                 return expected
                 
-            # Level 2: FUZZY MATCH (Agar 1 ya 2 number OCR ne galat padh liye tab bhi match karega)
-            if len(expected_up) >= 7:
-                # Text mein slide karke check karna
-                for i in range(len(super_clean_ocr) - len(expected_up) + 1):
-                    window = super_clean_ocr[i:i+len(expected_up)]
-                    # Kitne number mismatch hue?
-                    errors = sum(1 for a, b in zip(expected_up, window) if a != b)
-                    # Agar sirf 2 galtiyan hain, toh iska matlab yahi wo number hai!
+            # Fuzzy Match (Agar 2 number OCR ne galat bhi padhe, toh bhi match karega)
+            if len(expected) >= 8:
+                for i in range(len(pure_digits_ocr) - len(expected) + 1):
+                    window = pure_digits_ocr[i:i+len(expected)]
+                    errors = sum(1 for a, b in zip(expected, window) if a != b)
                     if errors <= 2: 
                         return expected
     except:
@@ -74,7 +68,8 @@ def process_pdf(uploaded_file, docket_list_text):
     raw_dockets = docket_list_text.replace(",", "\n").split("\n")
     expected_dockets = set()
     for d in raw_dockets:
-        clean_d = d.strip()
+        # Sirf numbers extract karna row data se
+        clean_d = re.sub(r'\D', '', d.strip())
         if clean_d:
             expected_dockets.add(clean_d)
             
@@ -120,16 +115,16 @@ def process_pdf(uploaded_file, docket_list_text):
 # --- UI Setup ---
 st.set_page_config(page_title="Smart PDF Matcher & Splitter", page_icon="🎯", layout="wide")
 st.title("🎯 Smart PDF Matcher & Splitter")
-st.write("Apne Dockets ki list (Raw Data) box mein daalein aur PDF upload karein. Ye app strictly aapke data se match karke rename karega.")
+st.write("Apne Dockets ki list (Row Data) daalein aur PDF upload karein. App strictly list se match karega.")
 
 col1, col2 = st.columns([1, 1])
 
 with col1:
     st.subheader("1. Enter Docket IDs")
     docket_input = st.text_area(
-        "Yahan apna Row Data (Docket IDs) paste karein (Ek line mein ek ID):", 
+        "Yahan apna Row Data paste karein:", 
         height=200, 
-        placeholder="Example:\n7002010582\n7002010901\n7002038210..."
+        placeholder="Example:\n7002010582\n7002038210..."
     )
 
 with col2:
@@ -161,7 +156,6 @@ if st.button("🚀 Match, Compress & Split PDF", use_container_width=True):
                 
                 if pending_list:
                     st.error(f"❌ PENDING BOX: Ye {len(pending_list)} Dockets aapki PDF mein NAHI mile")
-                    st.write("Inhe verify karein (Ya toh inki PDF missing hai, ya scan bilkul destroy ho chuka tha):")
                     for p in pending_list:
                         st.write(f"👉 **{p}**")
                 else:
