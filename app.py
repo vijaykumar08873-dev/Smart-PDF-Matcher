@@ -8,11 +8,12 @@ from pyzbar.pyzbar import decode
 import pytesseract
 
 def find_matching_docket(page, expected_dockets):
-    # --- 1. NATIVE PDF TEXT CHECK (Sabse fast aur 100% accurate) ---
+    # --- 1. NATIVE PDF TEXT CHECK ---
     native_text = page.get_text("text")
-    clean_native = re.sub(r'[\W_]+', '', native_text)
+    clean_native = re.sub(r'[\W_]+', '', native_text).upper()
     for expected in expected_dockets:
-        if expected in native_text or expected in clean_native:
+        expected_up = expected.upper()
+        if expected_up in native_text.upper() or expected_up in clean_native:
             return expected
             
     # --- Image Setup ---
@@ -33,33 +34,43 @@ def find_matching_docket(page, expected_dockets):
             if expected in data:
                 return expected
 
-    # --- 3. SMART OCR CHECK (Super Aggressive Matching 100% Fix) ---
+    # --- 3. ZOOM OCR + FUZZY MATCHING (THE ULTIMATE FIX) ---
     try:
-        text1 = pytesseract.image_to_string(img)
-        text2 = pytesseract.image_to_string(sharp_img)
+        # Image ko 2X bada karna taki OCR andha na ho
+        ocr_img = img.resize((img.width * 2, img.height * 2), Image.Resampling.LANCZOS)
+        ocr_sharp = sharp_img.resize((sharp_img.width * 2, sharp_img.height * 2), Image.Resampling.LANCZOS)
+        
+        text1 = pytesseract.image_to_string(ocr_img)
+        text2 = pytesseract.image_to_string(ocr_sharp)
         full_text = text1 + " \n " + text2
         
-        # Tedhi images mein OCR ki common galtiya theek karke Match karna
         clean_ocr = re.sub(r'[\W_]+', '', full_text).upper()
-        super_clean_ocr = clean_ocr.replace('O', '0').replace('Q', '0').replace('I', '1').replace('L', '1').replace('S', '5')
+        # Sabse common OCR mistakes ko fix karna
+        super_clean_ocr = clean_ocr.translate(str.maketrans('OQDIlLSZGB', '0001115268'))
         
         for expected in expected_dockets:
-            # 1. Direct check
-            if expected in full_text:
+            expected_up = expected.upper()
+            
+            # Level 1: Direct ya Clean Match
+            if expected_up in full_text.upper() or expected_up in clean_ocr or expected_up in super_clean_ocr:
                 return expected
-            # 2. Clean check (bina spaces ke)
-            if expected in clean_ocr:
-                return expected
-            # 3. Super clean check (OCR errors theek karne ke baad)
-            if expected in super_clean_ocr:
-                return expected
+                
+            # Level 2: FUZZY MATCH (Agar 1 ya 2 number OCR ne galat padh liye tab bhi match karega)
+            if len(expected_up) >= 7:
+                # Text mein slide karke check karna
+                for i in range(len(super_clean_ocr) - len(expected_up) + 1):
+                    window = super_clean_ocr[i:i+len(expected_up)]
+                    # Kitne number mismatch hue?
+                    errors = sum(1 for a, b in zip(expected_up, window) if a != b)
+                    # Agar sirf 2 galtiyan hain, toh iska matlab yahi wo number hai!
+                    if errors <= 2: 
+                        return expected
     except:
         pass
         
     return None
 
 def process_pdf(uploaded_file, docket_list_text):
-    # User ki di hui raw data list ko saaf karna
     raw_dockets = docket_list_text.replace(",", "\n").split("\n")
     expected_dockets = set()
     for d in raw_dockets:
@@ -76,14 +87,12 @@ def process_pdf(uploaded_file, docket_list_text):
         for page_num in range(len(pdf_document)):
             page = pdf_document.load_page(page_num)
             
-            # Match finding function ko call karna
             matched_id = find_matching_docket(page, expected_dockets)
             
             if matched_id:
                 file_name = f"{matched_id}.pdf"
                 found_dockets.add(matched_id)
             else:
-                # Unscanned wahi aayega jo aapki list mein nahi mila
                 file_name = f"Unscanned_Page_{page_num + 1}.pdf"
                 
             # --- SUPER COMPRESSION LOGIC (100 - 120 KB TARGET) ---
@@ -104,7 +113,6 @@ def process_pdf(uploaded_file, docket_list_text):
             
             zip_file.writestr(file_name, pdf_bytes)
             
-    # Pending dockets nikalna (Jo list mein the par PDF mein nahi mile)
     pending_dockets = expected_dockets - found_dockets
             
     return zip_buffer, list(found_dockets), list(pending_dockets)
@@ -140,7 +148,6 @@ if st.button("🚀 Match, Compress & Split PDF", use_container_width=True):
                 
                 st.success("🎉 Process Complete! Aapki ZIP file taiyaar hai.")
                 
-                # Download Button
                 st.download_button(
                     label="📥 Download Renamed & Compressed ZIP",
                     data=zip_data.getvalue(),
@@ -149,11 +156,9 @@ if st.button("🚀 Match, Compress & Split PDF", use_container_width=True):
                     use_container_width=True
                 )
                 
-                # --- PENDING BOX AUR RESULT REPORT YAHAN HAI ---
                 st.markdown("---")
                 st.header("📊 Result Report (Dhyan Se Dekhein)")
                 
-                # Bada Pending Box
                 if pending_list:
                     st.error(f"❌ PENDING BOX: Ye {len(pending_list)} Dockets aapki PDF mein NAHI mile")
                     st.write("Inhe verify karein (Ya toh inki PDF missing hai, ya scan bilkul destroy ho chuka tha):")
