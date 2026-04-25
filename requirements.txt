@@ -3,3 +3,4 @@ PyMuPDF
 Pillow
 pyzbar
 pytesseract
+google-genai
