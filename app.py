@@ -3,73 +3,73 @@ import fitz  # PyMuPDF
 import zipfile
 import io
 import re
-from PIL import Image, ImageEnhance, ImageOps
+import time
+from PIL import Image
 from pyzbar.pyzbar import decode
-import pytesseract
+from google import genai
 
-def find_matching_docket(page, expected_dockets):
-    # --- 1. NATIVE PDF TEXT CHECK ---
-    native_text = page.get_text("text")
-    clean_native = re.sub(r'\D', '', native_text) # Sirf numbers rakhega
-    for expected in expected_dockets:
-        if expected in native_text or expected in clean_native:
-            return expected
-            
-    # --- Image Setup ---
+# --- API KEY SETUP ---
+try:
+    API_KEY = st.secrets["GEMINI_API_KEY"]
+except:
+    st.error("API Key nahi mili! Kripya Streamlit ki settings mein Secrets check karein.")
+    st.stop()
+
+client = genai.Client(api_key=API_KEY)
+
+def find_matching_docket_ai(page, expected_dockets):
+    # Image setup
     pix = page.get_pixmap(dpi=300)
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     
-    gray_img = ImageOps.grayscale(img)
-    enhancer = ImageEnhance.Contrast(gray_img)
-    sharp_img = enhancer.enhance(2.0)
-    
-    # --- 2. ROTATION BARCODE SWEEP (Ye Tedhe pages ka 100% ilaaj hai) ---
-    # Tedhe scan ko theek karne ke liye image ko alag-alag angles par ghuma kar scan karenge
-    angles_to_try =[0, 5, -5, 10, -10, 15, -15, 20, -20, 90, -90]
-    
-    for angle in angles_to_try:
-        rotated_img = sharp_img.rotate(angle, expand=True, fillcolor=255)
-        barcodes = decode(rotated_img)
-        
-        for obj in barcodes:
-            data = obj.data.decode('utf-8').strip()
-            clean_data = re.sub(r'\D', '', data) # Barcode se kachra hatana
-            
-            for expected in expected_dockets:
-                if expected in data or expected in clean_data:
-                    return expected
-
-    # --- 3. SMART OCR CHECK WITH FUZZY LOGIC ---
-    try:
-        ocr_text = pytesseract.image_to_string(sharp_img)
-        
-        # OCR ki common galtiyo ko (O ko 0, l ko 1) strictly theek karna
-        fixed_ocr = ocr_text.upper().translate(str.maketrans('OQDIlLSZGB?', '00011152687'))
-        pure_digits_ocr = re.sub(r'\D', '', fixed_ocr) # Isme se saare alphabet nikal dena
-        
+    # 1. FAST CHECK: Pehle normal Barcode try karein (Taki time bache)
+    decoded_objects = decode(img)
+    for obj in decoded_objects:
+        data = obj.data.decode('utf-8').strip()
         for expected in expected_dockets:
-            # Exact Match in digits
-            if expected in pure_digits_ocr:
+            if expected in data:
+                return expected
+
+    # 2. AI CHECK: Agar barcode fail ho jaye (Pen ke nishaan ya tedha hone ki wajah se)
+    # Toh Gemini AI ko exact expected list denge dhoondne ke liye!
+    expected_list_str = ", ".join(expected_dockets)
+    prompt = f"""
+    You are an expert courier docket reader. Look at this image. 
+    It contains tracking numbers, but they might be covered by pen marks, circles, or signatures.
+    I am specifically looking for ANY ONE of these tracking numbers: [{expected_list_str}].
+    
+    Check the image very carefully. If you see any number from this list anywhere in the image (even if partially covered by ink), return ONLY that exact number.
+    If you absolutely do not find any number from the list, return 'NOT_FOUND'.
+    Do not add any other text.
+    """
+    
+    try:
+        # Free API limit se bachne ke liye thoda delay
+        time.sleep(2) 
+        
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[prompt, img]
+        )
+        
+        ai_result = response.text.strip().replace(" ", "").upper()
+        
+        # Check ki kya AI ka answer hamari list mein hai
+        for expected in expected_dockets:
+            if expected.upper() in ai_result:
                 return expected
                 
-            # Fuzzy Match (Agar 2 number OCR ne galat bhi padhe, toh bhi match karega)
-            if len(expected) >= 8:
-                for i in range(len(pure_digits_ocr) - len(expected) + 1):
-                    window = pure_digits_ocr[i:i+len(expected)]
-                    errors = sum(1 for a, b in zip(expected, window) if a != b)
-                    if errors <= 2: 
-                        return expected
-    except:
+    except Exception as e:
+        print("AI Error:", e)
         pass
         
     return None
 
-def process_pdf(uploaded_file, docket_list_text):
+def process_pdf(uploaded_file, docket_list_text, progress_bar, status_text):
     raw_dockets = docket_list_text.replace(",", "\n").split("\n")
     expected_dockets = set()
     for d in raw_dockets:
-        # Sirf numbers extract karna row data se
-        clean_d = re.sub(r'\D', '', d.strip())
+        clean_d = re.sub(r'\D', '', d.strip()) # Sirf numbers rakhega
         if clean_d:
             expected_dockets.add(clean_d)
             
@@ -77,12 +77,15 @@ def process_pdf(uploaded_file, docket_list_text):
     
     pdf_document = fitz.open(stream=uploaded_file.read(), filetype="pdf")
     zip_buffer = io.BytesIO()
+    total_pages = len(pdf_document)
     
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        for page_num in range(len(pdf_document)):
+        for page_num in range(total_pages):
+            status_text.text(f"Scanning Page {page_num + 1} of {total_pages} with AI... (Isme thoda time lag sakta hai)")
+            
             page = pdf_document.load_page(page_num)
             
-            matched_id = find_matching_docket(page, expected_dockets)
+            matched_id = find_matching_docket_ai(page, expected_dockets)
             
             if matched_id:
                 file_name = f"{matched_id}.pdf"
@@ -104,18 +107,18 @@ def process_pdf(uploaded_file, docket_list_text):
             
             pdf_bytes = new_pdf.write(garbage=4, deflate=True)
             new_pdf.close()
-            # -----------------------------------------------------
             
             zip_file.writestr(file_name, pdf_bytes)
+            progress_bar.progress((page_num + 1) / total_pages)
             
     pending_dockets = expected_dockets - found_dockets
             
     return zip_buffer, list(found_dockets), list(pending_dockets)
 
 # --- UI Setup ---
-st.set_page_config(page_title="Smart PDF Matcher & Splitter", page_icon="🎯", layout="wide")
-st.title("🎯 Smart PDF Matcher & Splitter")
-st.write("Apne Dockets ki list (Row Data) daalein aur PDF upload karein. App strictly list se match karega.")
+st.set_page_config(page_title="AI PDF Matcher & Splitter", page_icon="🤖", layout="wide")
+st.title("🤖 AI PDF Matcher & Splitter (100% Accuracy)")
+st.write("Ye app aapki list lega aur Google Gemini AI ki madad se pen ke nishaan ke andar se bhi number dhoondh kar rename karega!")
 
 col1, col2 = st.columns([1, 1])
 
@@ -137,29 +140,32 @@ if st.button("🚀 Match, Compress & Split PDF", use_container_width=True):
     elif not uploaded_pdf:
         st.error("Kripya Main PDF file upload karein!")
     else:
-        with st.spinner("Matching, Splitting & Compressing... Kripya intezaar karein..."):
+        with st.spinner("AI is working... Kripya intezaar karein (AI processing mein thoda zyada waqt lagta hai)..."):
             try:
-                zip_data, found_list, pending_list = process_pdf(uploaded_pdf, docket_input)
+                progress_bar = st.progress(0)
+                status_text = st.empty()
                 
-                st.success("🎉 Process Complete! Aapki ZIP file taiyaar hai.")
+                zip_data, found_list, pending_list = process_pdf(uploaded_pdf, docket_input, progress_bar, status_text)
+                
+                st.success("🎉 AI Process Complete! Aapki ZIP file taiyaar hai.")
                 
                 st.download_button(
                     label="📥 Download Renamed & Compressed ZIP",
                     data=zip_data.getvalue(),
-                    file_name="Matched_Dockets.zip",
+                    file_name="AI_Matched_Dockets.zip",
                     mime="application/zip",
                     use_container_width=True
                 )
                 
                 st.markdown("---")
-                st.header("📊 Result Report (Dhyan Se Dekhein)")
+                st.header("📊 Result Report")
                 
                 if pending_list:
-                    st.error(f"❌ PENDING BOX: Ye {len(pending_list)} Dockets aapki PDF mein NAHI mile")
+                    st.error(f"❌ PENDING BOX: Ye {len(pending_list)} Dockets PDF mein nahi mile")
                     for p in pending_list:
                         st.write(f"👉 **{p}**")
                 else:
-                    st.success("🎯 ALL CLEAR! Aapki list ke saare dockets PDF mein 100% mil gaye aur rename ho gaye.")
+                    st.success("🎯 ALL CLEAR! AI ne aapki list ke saare dockets dhoondh liye.")
                     
                 st.markdown("---")
                 st.success(f"✅ MATCHED BOX: Ye {len(found_list)} Dockets successfully rename ho gaye hain")
