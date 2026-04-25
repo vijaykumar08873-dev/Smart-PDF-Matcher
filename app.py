@@ -29,7 +29,7 @@ def find_matching_docket_ai(page, expected_dockets):
             if expected in data:
                 return expected
 
-    # 2. AI CHECK: Agar barcode dhundhla hai toh Gemini API se (Fast Mode)
+    # 2. AI CHECK: Agar barcode dhundhla hai toh Gemini API se
     expected_list_str = ", ".join(expected_dockets)
     prompt = f"""
     You are an expert courier docket reader. Look at this image. 
@@ -42,7 +42,6 @@ def find_matching_docket_ai(page, expected_dockets):
     """
     
     try:
-        # Pura process fast karne ke liye break hata diya gaya hai.
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[prompt, img]
@@ -53,7 +52,6 @@ def find_matching_docket_ai(page, expected_dockets):
             if expected.upper() in ai_result:
                 return expected
     except Exception as e:
-        # Agar Google ki taraf se fast requests ki limit hit ho, tabhi thoda wait karega aur retry karega
         if "429" in str(e):
             time.sleep(3)
             try:
@@ -95,7 +93,9 @@ def process_pdfs(uploaded_files, docket_list_text, progress_bar, status_text):
         for doc_idx, pdf_document in enumerate(pdf_docs):
             for page_num in range(len(pdf_document)):
                 current_page_count += 1
-                status_text.text(f"Scanning Page {current_page_count} of {total_pages}... (Fast Mode Running 🚀)")
+                
+                # YAHAN CHANGE HUA HAI: Extra text hata diya gaya hai
+                status_text.text(f"Scanning Page {current_page_count} of {total_pages}...")
                 
                 page = pdf_document.load_page(page_num)
                 
@@ -105,7 +105,6 @@ def process_pdfs(uploaded_files, docket_list_text, progress_bar, status_text):
                     file_name = f"{matched_id}.pdf"
                     found_dockets.add(matched_id)
                 else:
-                    # Multi-file ke liye unscanned page ka naam unique rahega
                     file_name = f"Unscanned_File_{doc_idx+1}_Page_{page_num + 1}.pdf"
                     
                 # --- SUPER COMPRESSION LOGIC (100 - 120 KB TARGET) ---
@@ -147,7 +146,6 @@ with col1:
 
 with col2:
     st.subheader("2. Upload Main PDFs")
-    # YAHAN CHANGE HUA HAI: Ab aap ek sath multiple files select kar sakte hain
     uploaded_files = st.file_uploader("Ek sath multiple courier PDFs upload karein", type=["pdf"], accept_multiple_files=True)
 
 if st.button("🚀 Match, Compress & Split PDF", use_container_width=True):
